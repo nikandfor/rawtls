@@ -7,6 +7,10 @@ import (
 )
 
 type (
+	Server struct {
+		Emitter
+	}
+
 	ServerHello struct {
 		Record    BytesRange
 		Handshake BytesRange
@@ -19,8 +23,8 @@ type (
 		CipherSuite       CipherSuite
 		Compression       byte
 
-		RecordLegacyVerson ProtocolVersion
-		HelloLegacyVerson  ProtocolVersion
+		RecordLegacyVersion ProtocolVersion
+		HelloLegacyVersion  ProtocolVersion
 
 		Exts     []Ext
 		Version  ProtocolVersion
@@ -30,18 +34,18 @@ type (
 	}
 )
 
-// Parse parses TLS ServerHello message.
+// ParseHello parses TLS ServerHello message.
 //
 // Based on:
 //
 //	RFC8446: The Transport Layer Security (TLS) Protocol Version 1.3
 //	https://datatracker.ietf.org/doc/html/rfc8446#autoid-22
-func (m *ServerHello) Parse(b []byte) (i int, err error) {
+func (s Server) ParseHello(b []byte, m *ServerHello) (i int, err error) {
 	// defer func() {
 	// 	fmt.Printf("parse server hello  %x, %v  from %v\n", i, err, caller(1))
 	// }()
 
-	m.Record, m.Handshake, i, err = parseHandshakeHeader(b, 0, 0x02, &m.RecordLegacyVerson)
+	m.Record, m.Handshake, i, err = parseHandshakeHeader(b, 0, MsgServerHello, &m.RecordLegacyVersion)
 	if err != nil {
 		return i, err
 	}
@@ -52,13 +56,16 @@ func (m *ServerHello) Parse(b []byte) (i int, err error) {
 		return i, ErrMalformed
 	}
 
-	m.HelloLegacyVerson = u16[ProtocolVersion](b, &i)
+	m.HelloLegacyVersion = u16[ProtocolVersion](b, &i)
 
 	m.Random = br(i, i+32)
 	i += 32
 
+	// the check reserves cipher suite, compression and extensions length too,
+	// they are read before they are checked
+
 	l := u8[int](b, &i) // session
-	if i+l > m.Record.End() {
+	if i+l+5 > m.Record.End() {
 		return i, ErrMalformed
 	}
 
@@ -66,8 +73,7 @@ func (m *ServerHello) Parse(b []byte) (i int, err error) {
 	i += l
 
 	m.CipherSuiteOffset = uint16(i)
-	m.CipherSuite[0] = u8[byte](b, &i)
-	m.CipherSuite[1] = u8[byte](b, &i)
+	m.CipherSuite = u16[CipherSuite](b, &i)
 
 	m.Compression = u8[byte](b, &i)
 
@@ -88,13 +94,51 @@ func (m *ServerHello) Parse(b []byte) (i int, err error) {
 	return i, err
 }
 
+// AppendHello appends TLS ServerHello message m to the buffer b.
+// Variable length values are copied from src, the buffer m was parsed from.
+func (s Server) AppendHello(b []byte, m *ServerHello, src []byte) []byte {
+	b, rec := s.OpenRecord(b, RecHandshake, m.RecordLegacyVersion)
+	b, hs := s.OpenHandshake(b, MsgServerHello)
+
+	b = appendU16(b, m.HelloLegacyVersion)
+	b = append(b, m.Random.Data(src)...)
+
+	b, st := s.OpenLen8(b) // session
+	b = append(b, m.Session.Data(src)...)
+	b = s.CloseLen8(b, st)
+
+	b = appendU16(b, m.CipherSuite)
+	b = appendU8(b, m.Compression)
+
+	b, st = s.OpenLen16(b) // extensions
+
+	for _, x := range m.Exts {
+		b = s.AppendExt(b, src, x)
+	}
+
+	b = s.CloseLen16(b, st)
+
+	b = s.CloseHandshake(b, hs)
+	b = s.CloseRecord(b, rec)
+
+	return b
+}
+
 func (m *ServerHello) parseExt(b []byte, e Ext) error {
 	i := e.Start()
 
 	switch e.Type {
-	case 0x002b: // negoriated version
+	case ExtSupportedVersions: // negotiated version
+		if e.Length != 2 {
+			return ErrMalformed
+		}
+
 		m.Version = u16[ProtocolVersion](b, &i)
-	case 0x0033: // Key Share
+	case ExtKeyShare:
+		if e.Length < 4 {
+			return ErrMalformed
+		}
+
 		var k Key
 
 		k.Group = u16[KeyGroup](b, &i)
@@ -135,7 +179,7 @@ func (m *ServerHello) Dump(buf []byte) string {
 	fmt.Fprintf(&b, "compress      %4x %4x\n", m.CipherSuiteOffset+2, m.Compression)
 	fmt.Fprintf(&b, "extensions    %4x %4x\n", m.Extensions.S, m.Extensions.E)
 
-	fmt.Fprintf(&b, "version leg   %04x %04x\n", m.RecordLegacyVerson, m.HelloLegacyVerson)
+	fmt.Fprintf(&b, "version leg   %04x %04x\n", m.RecordLegacyVersion, m.HelloLegacyVersion)
 	fmt.Fprintf(&b, "version       %04x\n", m.Version)
 
 	for _, ext := range m.Exts {

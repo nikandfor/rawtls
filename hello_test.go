@@ -22,14 +22,25 @@ func TestClientHello(t *testing.T) {
 				return
 			}
 
+			var c Client
 			var m ClientHello
 
-			i, err := m.Parse(data)
+			i, err := c.ParseHello(data, &m)
 			if err != nil {
 				t.Errorf("parse: %v", err)
 			}
 			if i != len(data) {
 				t.Errorf("parsed %d/%d", i, len(data))
+			}
+
+			b := c.AppendHello(nil, &m, data)
+			if d := diffAt(b, data[:i]); d >= 0 {
+				t.Errorf("append: differs at %#x, encoded %#x, wanted %#x", d, len(b), i)
+			}
+
+			b = c.AppendHello(append(b[:0], 0xff, 0xff), &m, data) // reused buffer, non empty prefix
+			if d := diffAt(b[2:], data[:i]); d >= 0 {
+				t.Errorf("append to prefix: differs at %#x, encoded %#x, wanted %#x", d, len(b)-2, i)
 			}
 
 			// t.Logf("hello %+v\n", m)
@@ -55,14 +66,25 @@ func TestServerHello(t *testing.T) {
 				return
 			}
 
+			var s Server
 			var m ServerHello
 
-			i, err := m.Parse(data)
+			i, err := s.ParseHello(data, &m)
 			if err != nil {
 				t.Errorf("parse: %v", err)
 			}
 			if i != len(data) {
 				t.Errorf("parsed %d/%d", i, len(data))
+			}
+
+			b := s.AppendHello(nil, &m, data)
+			if d := diffAt(b, data[:i]); d >= 0 {
+				t.Errorf("append: differs at %#x, encoded %#x, wanted %#x", d, len(b), i)
+			}
+
+			b = s.AppendHello(append(b[:0], 0xff, 0xff), &m, data) // reused buffer, non empty prefix
+			if d := diffAt(b[2:], data[:i]); d >= 0 {
+				t.Errorf("append to prefix: differs at %#x, encoded %#x, wanted %#x", d, len(b)-2, i)
 			}
 
 			if t.Failed() {
@@ -71,4 +93,18 @@ func TestServerHello(t *testing.T) {
 			}
 		})
 	}
+}
+
+func diffAt(a, b []byte) int {
+	for i := range min(len(a), len(b)) {
+		if a[i] != b[i] {
+			return i
+		}
+	}
+
+	if len(a) != len(b) {
+		return min(len(a), len(b))
+	}
+
+	return -1
 }

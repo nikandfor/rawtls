@@ -72,6 +72,7 @@ func serve() error {
 	log.Printf("listening %v", l.Addr())
 
 	var wg sync.WaitGroup
+	defer wg.Wait()
 
 	for {
 		c, err := l.Accept()
@@ -110,9 +111,9 @@ func handleConn(ctx context.Context, c net.Conn, target string) (err error) {
 
 	var cl tls.ClientHello
 
-	i, err := cl.Parse(buf[:n])
+	i, err := tls.Client{}.ParseHello(buf[:n], &cl)
 	if true {
-		log.Printf("\n%s", cl.Dump(buf))
+		log.Printf("\n%s", cl.Dump(buf[:n]))
 	}
 
 	if *dump {
@@ -139,7 +140,7 @@ func handleConn(ctx context.Context, c net.Conn, target string) (err error) {
 
 	var srv tls.ServerHello
 
-	i, err = srv.Parse(buf[:n])
+	i, err = tls.Server{}.ParseHello(buf[:n], &srv)
 	if true {
 		log.Printf("\n%s", srv.Dump(buf[:n]))
 	}

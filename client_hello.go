@@ -1,16 +1,18 @@
 package rawtls
 
 import (
-	"errors"
 	"fmt"
 	"hash/crc32"
-	"io"
 	"path/filepath"
 	"runtime"
 	"strings"
 )
 
 type (
+	Client struct {
+		Emitter
+	}
+
 	ClientHello struct {
 		Record    BytesRange
 		Handshake BytesRange
@@ -21,8 +23,8 @@ type (
 		Compression  BytesRange
 		Extensions   BytesRange
 
-		RecordLegacyVerson ProtocolVersion
-		HelloLegacyVerson  ProtocolVersion
+		RecordLegacyVersion ProtocolVersion
+		HelloLegacyVersion  ProtocolVersion
 
 		ServerName BytesRange
 
@@ -34,56 +36,20 @@ type (
 		keysbuf [4]Key
 		versbuf [4]ProtocolVersion
 	}
-
-	ExtensionType   uint16
-	ProtocolVersion uint16
-
-	CipherSuite [2]uint8
-
-	Ext struct {
-		Type   ExtensionType
-		Length uint16
-		Offset uint16
-	}
-
-	KeyGroup uint16
-
-	Key struct {
-		Group  KeyGroup
-		Length uint16
-		Offset uint16
-	}
-
-	BytesRange struct {
-		S, E uint16 // start, end
-	}
-
-	ints interface {
-		~int | ~uint8 | ~uint16 | ~uint32
-	}
 )
 
-var (
-	ErrFragmented  = errors.New("fragmented message")
-	ErrShortBuffer = io.ErrShortBuffer
-	ErrUnexpected  = errors.New("unexpected message")
-	ErrMalformed   = errors.New("malformed message")
-)
-
-var zeroRange BytesRange
-
-// Parse parses TLS ClientHello message.
+// ParseHello parses TLS ClientHello message.
 //
 // Based on:
 //
 //	RFC8446: The Transport Layer Security (TLS) Protocol Version 1.3
 //	https://datatracker.ietf.org/doc/html/rfc8446#autoid-21
-func (m *ClientHello) Parse(b []byte) (i int, err error) {
+func (c Client) ParseHello(b []byte, m *ClientHello) (i int, err error) {
 	// defer func() {
 	// 	fmt.Printf("parse client hello  %x, %v  from %v\n", i, err, caller(1))
 	// }()
 
-	m.Record, m.Handshake, i, err = parseHandshakeHeader(b, 0, 0x01, &m.RecordLegacyVerson)
+	m.Record, m.Handshake, i, err = parseHandshakeHeader(b, 0, MsgClientHello, &m.RecordLegacyVersion)
 	if err != nil {
 		return i, err
 	}
@@ -94,13 +60,15 @@ func (m *ClientHello) Parse(b []byte) (i int, err error) {
 		return i, ErrMalformed
 	}
 
-	m.HelloLegacyVerson = u16[ProtocolVersion](b, &i)
+	m.HelloLegacyVersion = u16[ProtocolVersion](b, &i)
 
 	m.Random = br(i, i+32)
 	i += 32
 
+	// each check reserves the next field length prefix too, it's read before it's checked
+
 	l := u8[int](b, &i) // session
-	if i+l > m.Record.End() {
+	if i+l+2 > m.Record.End() {
 		return i, ErrMalformed
 	}
 
@@ -108,7 +76,7 @@ func (m *ClientHello) Parse(b []byte) (i int, err error) {
 	i += l
 
 	l = u16[int](b, &i) // cipher suites
-	if i+l > m.Record.End() {
+	if i+l+1 > m.Record.End() {
 		return i, ErrMalformed
 	}
 
@@ -116,7 +84,7 @@ func (m *ClientHello) Parse(b []byte) (i int, err error) {
 	i += l
 
 	l = u8[int](b, &i) // legacy compression algs
-	if i+l > m.Record.End() {
+	if i+l+2 > m.Record.End() {
 		return i, ErrMalformed
 	}
 
@@ -140,30 +108,77 @@ func (m *ClientHello) Parse(b []byte) (i int, err error) {
 	return i, err
 }
 
+// AppendHello appends TLS ClientHello message m to the buffer b.
+// Variable length values are copied from src, the buffer m was parsed from.
+func (c Client) AppendHello(b []byte, m *ClientHello, src []byte) []byte {
+	b, rec := c.OpenRecord(b, RecHandshake, m.RecordLegacyVersion)
+	b, hs := c.OpenHandshake(b, MsgClientHello)
+
+	b = appendU16(b, m.HelloLegacyVersion)
+	b = append(b, m.Random.Data(src)...)
+
+	b, st := c.OpenLen8(b) // session
+	b = append(b, m.Session.Data(src)...)
+	b = c.CloseLen8(b, st)
+
+	b, st = c.OpenLen16(b) // cipher suites
+	b = append(b, m.CipherSuites.Data(src)...)
+	b = c.CloseLen16(b, st)
+
+	b, st = c.OpenLen8(b) // legacy compression algs
+	b = append(b, m.Compression.Data(src)...)
+	b = c.CloseLen8(b, st)
+
+	b, st = c.OpenLen16(b) // extensions
+
+	for _, x := range m.Exts {
+		b = c.AppendExt(b, src, x)
+	}
+
+	b = c.CloseLen16(b, st)
+
+	b = c.CloseHandshake(b, hs)
+	b = c.CloseRecord(b, rec)
+
+	return b
+}
+
 func (m *ClientHello) parseExt(b []byte, e Ext) error {
 	i := e.Start()
 
 	switch e.Type {
-	case 0x0000: // server name
+	case ExtServerName:
+		if e.Length < 2 {
+			return ErrMalformed
+		}
+
 		l := u16[int](b, &i)
 		if i+l != e.End() || l < 1 {
 			return ErrMalformed
 		}
 
 		for end := i + l; i < end; {
-			tp := u8[uint8](b, &i)
+			if i+3 > end {
+				return ErrMalformed
+			}
+
+			tp := u8[NameType](b, &i)
 			l := u16[int](b, &i)
 			if i+l > end {
 				return ErrMalformed
 			}
 
-			if tp == 0x00 { // hostname
+			if tp == NameHostName {
 				m.ServerName = br(i, i+l)
 			}
 
 			i += l
 		}
-	case 0x002b: // supported versions
+	case ExtSupportedVersions:
+		if e.Length < 1 {
+			return ErrMalformed
+		}
+
 		l := u8[int](b, &i)
 		if i+l != e.End() || l&1 == 1 {
 			return ErrMalformed
@@ -174,13 +189,21 @@ func (m *ClientHello) parseExt(b []byte, e Ext) error {
 
 			m.Versions = append(m.Versions, ver)
 		}
-	case 0x0033: // Key Share
+	case ExtKeyShare:
+		if e.Length < 2 {
+			return ErrMalformed
+		}
+
 		l := u16[int](b, &i)
 		if i+l != e.End() {
 			return ErrMalformed
 		}
 
 		for end := i + l; i < end; {
+			if i+4 > end {
+				return ErrMalformed
+			}
+
 			var k Key
 
 			k.Group = u16[KeyGroup](b, &i)
@@ -215,6 +238,10 @@ func parseExts(b []byte, st, end int, extf func(b []byte, e Ext) error, exts []E
 		e.Length = u16[uint16](b, &i)
 		e.Offset = uint16(i)
 
+		if e.End() > end {
+			return exts, i, ErrMalformed
+		}
+
 		exts = append(exts, e)
 
 		if extf != nil {
@@ -230,7 +257,7 @@ func parseExts(b []byte, st, end int, extf func(b []byte, e Ext) error, exts []E
 	return exts, i, nil
 }
 
-func parseHandshakeHeader(b []byte, st int, msg byte, ver *ProtocolVersion) (rec, hs BytesRange, i int, err error) {
+func parseHandshakeHeader(b []byte, st int, msg HandshakeType, ver *ProtocolVersion) (rec, hs BytesRange, i int, err error) {
 	rec, i, err = parseRecordHeader(b, st, ver)
 	if err != nil {
 		return rec, hs, i, err
@@ -242,7 +269,7 @@ func parseHandshakeHeader(b []byte, st int, msg byte, ver *ProtocolVersion) (rec
 		return rec, hs, rec.Start(), ErrMalformed
 	}
 
-	if u8[uint8](b, &i) != msg { // handshake type != message type (client/server hello)
+	if u8[HandshakeType](b, &i) != msg { // handshake type != message type (client/server hello)
 		return rec, hs, i, ErrUnexpected
 	}
 
@@ -268,7 +295,7 @@ func parseRecordHeader(b []byte, st int, ver *ProtocolVersion) (rec BytesRange, 
 		return
 	}
 
-	if u8[byte](b, &i) != 0x16 { // record type != tls handshake
+	if u8[ContentType](b, &i) != RecHandshake {
 		err = ErrUnexpected
 		return
 	}
@@ -325,7 +352,7 @@ func (m *ClientHello) Dump(buf []byte) string {
 		cip = make([]CipherSuite, len(data)/2)
 
 		for i := range cip {
-			cip[i] = CipherSuite{data[2*i], data[2*i+1]}
+			cip[i] = CipherSuite(data[2*i])<<8 | CipherSuite(data[2*i+1])
 		}
 	}
 
@@ -337,7 +364,7 @@ func (m *ClientHello) Dump(buf []byte) string {
 	fmt.Fprintf(&b, "compress      %4x %4x\n", m.Compression.S, m.Compression.E)
 	fmt.Fprintf(&b, "extensions    %4x %4x\n", m.Extensions.S, m.Extensions.E)
 
-	fmt.Fprintf(&b, "version leg   %04x %04x\n", m.RecordLegacyVerson, m.HelloLegacyVerson)
+	fmt.Fprintf(&b, "version leg   %04x %04x\n", m.RecordLegacyVersion, m.HelloLegacyVersion)
 
 	if !m.ServerName.IsZero() {
 		fmt.Fprintf(&b, "    server    %4x %4x", m.ServerName.S, m.ServerName.E)
@@ -404,13 +431,13 @@ func u8[T ints](b []byte, i *int) T {
 	return r
 }
 
-func u16[T ints](b []byte, i *int) T {
+func u16[T ints16](b []byte, i *int) T {
 	r := T(b[*i])<<8 + T(b[*i+1])
 	*i += 2
 	return r
 }
 
-func u24[T ints](b []byte, i *int) T {
+func u24[T ints32](b []byte, i *int) T {
 	r := T(b[*i])<<16 + T(b[*i+1])<<8 + T(b[*i+2])
 	*i += 3
 	return r
@@ -427,14 +454,15 @@ func (r BytesRange) IsZero() bool         { return r == BytesRange{} }
 func (r BytesRange) Data(b []byte) []byte { return b[r.S:r.E] }
 
 func (e Ext) Start() int           { return int(e.Offset) }
-func (e Ext) End() int             { return int(e.Offset + e.Length) }
+func (e Ext) End() int             { return int(e.Offset) + int(e.Length) }
 func (e Ext) IsZero() bool         { return e == Ext{} }
-func (e Ext) Data(b []byte) []byte { return b[e.Offset : e.Offset+e.Length] }
+func (e Ext) Data(b []byte) []byte { return b[e.Start():e.End()] }
 func (k Key) Start() int           { return int(k.Offset) }
-func (k Key) End() int             { return int(k.Offset + k.Length) }
+func (k Key) End() int             { return int(k.Offset) + int(k.Length) }
 func (k Key) IsZero() bool         { return k == Key{} }
-func (k Key) Data(b []byte) []byte { return b[k.Offset : k.Offset+k.Length] }
+func (k Key) Data(b []byte) []byte { return b[k.Start():k.End()] }
 
+//nolint:unused // used by the commented out debug lines
 func caller(d int) string {
 	_, file, line, _ := runtime.Caller(1 + d)
 
