@@ -1,6 +1,7 @@
 package rawtls
 
 import (
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"path/filepath"
@@ -9,8 +10,9 @@ import (
 )
 
 type (
-	Client struct {
+	ClientSide struct {
 		Emitter
+		Iterator
 	}
 
 	ClientHello struct {
@@ -26,7 +28,11 @@ type (
 		RecordLegacyVersion ProtocolVersion
 		HelloLegacyVersion  ProtocolVersion
 
-		ServerName BytesRange
+		ServerName          BytesRange
+		SupportedGroups     BytesRange // list of KeyGroup
+		SignatureAlgorithms BytesRange // list of SignatureScheme
+		ALPN                BytesRange // ProtocolNameList
+		Cookie              BytesRange
 
 		Exts     []Ext
 		Versions []ProtocolVersion
@@ -38,25 +44,39 @@ type (
 	}
 )
 
-// ParseHello parses TLS ClientHello message.
+// ParseHello parses TLS ClientHello record.
+// The record must contain exactly one complete message.
 //
 // Based on:
 //
 //	RFC8446: The Transport Layer Security (TLS) Protocol Version 1.3
 //	https://datatracker.ietf.org/doc/html/rfc8446#autoid-21
-func (c Client) ParseHello(b []byte, m *ClientHello) (i int, err error) {
+func (c ClientSide) ParseHello(b []byte, m *ClientHello) (i int, err error) {
 	// defer func() {
 	// 	fmt.Printf("parse client hello  %x, %v  from %v\n", i, err, caller(1))
 	// }()
 
-	m.Record, m.Handshake, i, err = parseHandshakeHeader(b, 0, MsgClientHello, &m.RecordLegacyVersion)
+	m.Record, i, err = parseHandshakeRecord(b, 0, &m.RecordLegacyVersion)
 	if err != nil {
 		return i, err
 	}
 
-	// client hello
+	i, err = c.ParseHelloMessage(b[:m.Record.End()], i, m)
 
-	if i+40 > m.Handshake.End() {
+	return helloRecordEnd(m.Record, i, err)
+}
+
+// ParseHelloMessage parses ClientHello handshake message at st.
+// Record is left as is.
+func (c ClientSide) ParseHelloMessage(b []byte, st int, m *ClientHello) (i int, err error) {
+	m.Handshake, i, err = parseMessage(b, st, MsgClientHello)
+	if err != nil {
+		return i, err
+	}
+
+	end := m.Handshake.End()
+
+	if i+40 > end {
 		return i, ErrMalformed
 	}
 
@@ -68,7 +88,7 @@ func (c Client) ParseHello(b []byte, m *ClientHello) (i int, err error) {
 	// each check reserves the next field length prefix too, it's read before it's checked
 
 	l := u8[int](b, &i) // session
-	if i+l+2 > m.Record.End() {
+	if i+l+2 > end {
 		return i, ErrMalformed
 	}
 
@@ -76,7 +96,7 @@ func (c Client) ParseHello(b []byte, m *ClientHello) (i int, err error) {
 	i += l
 
 	l = u16[int](b, &i) // cipher suites
-	if i+l+1 > m.Record.End() {
+	if i+l+1 > end {
 		return i, ErrMalformed
 	}
 
@@ -84,7 +104,7 @@ func (c Client) ParseHello(b []byte, m *ClientHello) (i int, err error) {
 	i += l
 
 	l = u8[int](b, &i) // legacy compression algs
-	if i+l+2 > m.Record.End() {
+	if i+l+2 > end {
 		return i, ErrMalformed
 	}
 
@@ -92,7 +112,7 @@ func (c Client) ParseHello(b []byte, m *ClientHello) (i int, err error) {
 	i += l
 
 	l = u16[int](b, &i) // extensions
-	if i+l > m.Record.End() {
+	if i+l > end {
 		return i, ErrMalformed
 	}
 
@@ -108,9 +128,52 @@ func (c Client) ParseHello(b []byte, m *ClientHello) (i int, err error) {
 	return i, err
 }
 
+// OpenHello starts ClientHello message: the header and the fields before extensions.
+// Extensions are appended then, and the message is finished with CloseHello.
+//
+//	b, hs, ext := c.OpenHello(b, random, session, TLS_AES_128_GCM_SHA256)
+//	b = c.AppendExtServerName(b, host)
+//	b = c.CloseHello(b, hs, ext)
+func (c ClientSide) OpenHello(b, random, session []byte, suites ...CipherSuite) (_ []byte, hs, ext int) {
+	if len(random) != 32 {
+		panic(len(random))
+	}
+
+	b, hs = c.OpenHandshake(b, MsgClientHello)
+
+	b = appendU16(b, VerTLS12)
+	b = append(b, random...)
+
+	b, st := c.OpenLen8(b)
+	b = append(b, session...)
+	b = c.CloseLen8(b, st)
+
+	b, st = c.OpenLen16(b)
+
+	for _, s := range suites {
+		b = appendU16(b, s)
+	}
+
+	b = c.CloseLen16(b, st)
+
+	b, st = c.OpenLen8(b)
+	b = appendU8(b, 0) // null compression
+	b = c.CloseLen8(b, st)
+
+	b, ext = c.OpenLen16(b)
+
+	return b, hs, ext
+}
+
+func (c ClientSide) CloseHello(b []byte, hs, ext int) []byte {
+	b = c.CloseLen16(b, ext)
+
+	return c.CloseHandshake(b, hs)
+}
+
 // AppendHello appends TLS ClientHello message m to the buffer b.
 // Variable length values are copied from src, the buffer m was parsed from.
-func (c Client) AppendHello(b []byte, m *ClientHello, src []byte) []byte {
+func (c ClientSide) AppendHello(b []byte, m *ClientHello, src []byte) []byte {
 	b, rec := c.OpenRecord(b, RecHandshake, m.RecordLegacyVersion)
 	b, hs := c.OpenHandshake(b, MsgClientHello)
 
@@ -189,6 +252,31 @@ func (m *ClientHello) parseExt(b []byte, e Ext) error {
 
 			m.Versions = append(m.Versions, ver)
 		}
+	case ExtSupportedGroups, ExtSignatureAlgorithms:
+		r, err := parseList16(b, e)
+		if err != nil {
+			return err
+		}
+
+		if e.Type == ExtSupportedGroups {
+			m.SupportedGroups = r
+		} else {
+			m.SignatureAlgorithms = r
+		}
+	case ExtALPN:
+		r, err := parseALPN(b, e)
+		if err != nil {
+			return err
+		}
+
+		m.ALPN = r
+	case ExtCookie:
+		r, err := parseCookie(b, e)
+		if err != nil {
+			return err
+		}
+
+		m.Cookie = r
 	case ExtKeyShare:
 		if e.Length < 2 {
 			return ErrMalformed
@@ -257,63 +345,126 @@ func parseExts(b []byte, st, end int, extf func(b []byte, e Ext) error, exts []E
 	return exts, i, nil
 }
 
-func parseHandshakeHeader(b []byte, st int, msg HandshakeType, ver *ProtocolVersion) (rec, hs BytesRange, i int, err error) {
-	rec, i, err = parseRecordHeader(b, st, ver)
+// parseHandshakeRecord parses handshake record header at st
+// and checks the whole record is in b.
+func parseHandshakeRecord(b []byte, st int, ver *ProtocolVersion) (rec BytesRange, i int, err error) {
+	var d Iterator
+
+	tp, v, l, i, err := d.RecordHeader(b, st)
 	if err != nil {
-		return rec, hs, i, err
+		return rec, i, err
+	}
+	if tp != RecHandshake {
+		return rec, st, ErrUnexpected
 	}
 
-	// handshake start
+	*ver = v
 
-	if i+4 > rec.End() {
-		return rec, hs, rec.Start(), ErrMalformed
-	}
-
-	if u8[HandshakeType](b, &i) != msg { // handshake type != message type (client/server hello)
-		return rec, hs, i, ErrUnexpected
-	}
-
-	l := u24[int](b, &i) // handshake length
-	if i+l > rec.End() {
-		return rec, hs, i, ErrFragmented
-	}
-
-	hs = br(i, i+l)
-
-	if hs.E != rec.E {
-		return rec, hs, i, ErrMalformed
-	}
-
-	return rec, hs, i, nil
-}
-
-func parseRecordHeader(b []byte, st int, ver *ProtocolVersion) (rec BytesRange, i int, err error) {
-	i = st
-
-	if i+9 > len(b) {
-		err = ErrShortBuffer
-		return
-	}
-
-	if u8[ContentType](b, &i) != RecHandshake {
-		err = ErrUnexpected
-		return
-	}
-
-	if ver != nil {
-		*ver = u16[ProtocolVersion](b, &i)
-	} else {
-		i += 2
-	}
-
-	l := u16[int](b, &i) // record length
 	rec = br(i, i+l)
 
 	if i+l > len(b) {
-		err = ErrShortBuffer
+		return rec, i, ErrShortBuffer
 	}
 
-	return rec, i, err
+	return rec, i, nil
+}
+
+// helloRecordEnd converts the hello message parse result into the record parse result.
+// The message must fill the record exactly.
+func helloRecordEnd(rec BytesRange, i int, err error) (int, error) {
+	if errors.Is(err, ErrShortBuffer) { // the message continues in the next record
+		return i, ErrFragmented
+	}
+	if err != nil {
+		return i, err
+	}
+
+	if i != rec.End() {
+		return i, ErrMalformed
+	}
+
+	return i, nil
+}
+
+// parseMessage parses handshake message header of type msg at st.
+// It returns the message body range.
+func parseMessage(b []byte, st int, msg HandshakeType) (hs BytesRange, i int, err error) {
+	var d Iterator
+
+	body, i, err := d.Message(b, st, msg)
+	if err != nil {
+		return hs, i, err
+	}
+
+	if i > 0xffff { // ranges are uint16
+		return hs, st, ErrMalformed
+	}
+
+	return br(i-len(body), i), i - len(body), nil
+}
+
+// parseList16 parses extension data which is a non-empty list of 16-bit values.
+// It returns the list range.
+func parseList16(b []byte, e Ext) (BytesRange, error) {
+	i := e.Start()
+
+	if e.Length < 2 {
+		return zeroRange, ErrMalformed
+	}
+
+	l := u16[int](b, &i)
+	if i+l != e.End() || l == 0 || l&1 == 1 {
+		return zeroRange, ErrMalformed
+	}
+
+	return br(i, i+l), nil
+}
+
+// parseALPN parses application_layer_protocol_negotiation extension data.
+// It returns the ProtocolNameList range.
+//
+//	RFC7301: https://datatracker.ietf.org/doc/html/rfc7301#section-3.1
+func parseALPN(b []byte, e Ext) (BytesRange, error) {
+	i := e.Start()
+
+	if e.Length < 2 {
+		return zeroRange, ErrMalformed
+	}
+
+	l := u16[int](b, &i)
+	if i+l != e.End() || l == 0 {
+		return zeroRange, ErrMalformed
+	}
+
+	r := br(i, i+l)
+
+	for i < r.End() {
+		l := u8[int](b, &i)
+		if l == 0 || i+l > r.End() {
+			return zeroRange, ErrMalformed
+		}
+
+		i += l
+	}
+
+	return r, nil
+}
+
+// parseCookie parses cookie extension data.
+// It returns the cookie range.
+func parseCookie(b []byte, e Ext) (BytesRange, error) {
+	i := e.Start()
+
+	if e.Length < 2 {
+		return zeroRange, ErrMalformed
+	}
+
+	l := u16[int](b, &i)
+	if i+l != e.End() || l == 0 {
+		return zeroRange, ErrMalformed
+	}
+
+	return br(i, i+l), nil
 }
 
 func (m *ClientHello) softResetExts() {
@@ -336,6 +487,10 @@ func (m *ClientHello) softResetExts() {
 	}
 
 	m.ServerName = zeroRange
+	m.SupportedGroups = zeroRange
+	m.SignatureAlgorithms = zeroRange
+	m.ALPN = zeroRange
+	m.Cookie = zeroRange
 }
 
 func (m *ClientHello) Dump(buf []byte) string {
@@ -352,7 +507,8 @@ func (m *ClientHello) Dump(buf []byte) string {
 		cip = make([]CipherSuite, len(data)/2)
 
 		for i := range cip {
-			cip[i] = CipherSuite(data[2*i])<<8 | CipherSuite(data[2*i+1])
+			j := 2 * i
+			cip[i] = u16[CipherSuite](data, &j)
 		}
 	}
 
@@ -423,24 +579,6 @@ func (k Key) dump(b *strings.Builder, buf []byte) {
 	}
 
 	b.WriteByte('\n')
-}
-
-func u8[T ints](b []byte, i *int) T {
-	r := T(b[*i])
-	*i++
-	return r
-}
-
-func u16[T ints16](b []byte, i *int) T {
-	r := T(b[*i])<<8 + T(b[*i+1])
-	*i += 2
-	return r
-}
-
-func u24[T ints32](b []byte, i *int) T {
-	r := T(b[*i])<<16 + T(b[*i+1])<<8 + T(b[*i+2])
-	*i += 3
-	return r
 }
 
 func br(st, end int) BytesRange {

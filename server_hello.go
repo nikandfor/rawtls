@@ -7,8 +7,9 @@ import (
 )
 
 type (
-	Server struct {
+	ServerSide struct {
 		Emitter
+		Iterator
 	}
 
 	ServerHello struct {
@@ -28,31 +29,47 @@ type (
 
 		Exts     []Ext
 		Version  ProtocolVersion
-		KeyShare Key
+		KeyShare Key // Length is 0 in HelloRetryRequest, only the group is selected
+		Cookie   BytesRange
 
 		extsbuf [4]Ext
 	}
 )
 
-// ParseHello parses TLS ServerHello message.
+// ParseHello parses TLS ServerHello record.
+// The record must contain exactly one complete message.
 //
 // Based on:
 //
 //	RFC8446: The Transport Layer Security (TLS) Protocol Version 1.3
 //	https://datatracker.ietf.org/doc/html/rfc8446#autoid-22
-func (s Server) ParseHello(b []byte, m *ServerHello) (i int, err error) {
+func (s ServerSide) ParseHello(b []byte, m *ServerHello) (i int, err error) {
 	// defer func() {
 	// 	fmt.Printf("parse server hello  %x, %v  from %v\n", i, err, caller(1))
 	// }()
 
-	m.Record, m.Handshake, i, err = parseHandshakeHeader(b, 0, MsgServerHello, &m.RecordLegacyVersion)
+	m.Record, i, err = parseHandshakeRecord(b, 0, &m.RecordLegacyVersion)
 	if err != nil {
 		return i, err
 	}
 
-	// server hello
+	i, err = s.ParseHelloMessage(b[:m.Record.End()], i, m)
 
-	if i+40 > m.Handshake.End() {
+	return helloRecordEnd(m.Record, i, err)
+}
+
+// ParseHelloMessage parses ServerHello handshake message at st.
+// HelloRetryRequest is a ServerHello too, see IsHelloRetryRequest.
+// Record is left as is.
+func (s ServerSide) ParseHelloMessage(b []byte, st int, m *ServerHello) (i int, err error) {
+	m.Handshake, i, err = parseMessage(b, st, MsgServerHello)
+	if err != nil {
+		return i, err
+	}
+
+	end := m.Handshake.End()
+
+	if i+40 > end {
 		return i, ErrMalformed
 	}
 
@@ -65,7 +82,7 @@ func (s Server) ParseHello(b []byte, m *ServerHello) (i int, err error) {
 	// they are read before they are checked
 
 	l := u8[int](b, &i) // session
-	if i+l+5 > m.Record.End() {
+	if i+l+5 > end {
 		return i, ErrMalformed
 	}
 
@@ -78,7 +95,7 @@ func (s Server) ParseHello(b []byte, m *ServerHello) (i int, err error) {
 	m.Compression = u8[byte](b, &i)
 
 	l = u16[int](b, &i) // extensions
-	if i+l > m.Record.End() {
+	if i+l > end {
 		return i, ErrMalformed
 	}
 
@@ -94,9 +111,40 @@ func (s Server) ParseHello(b []byte, m *ServerHello) (i int, err error) {
 	return i, err
 }
 
+// OpenHello starts ServerHello message: the header and the fields before extensions.
+// HelloRetryRequest is started with HelloRetryRequestRandom.
+// Extensions are appended then, and the message is finished with CloseHello.
+func (s ServerSide) OpenHello(b, random, session []byte, suite CipherSuite) (_ []byte, hs, ext int) {
+	if len(random) != 32 {
+		panic(len(random))
+	}
+
+	b, hs = s.OpenHandshake(b, MsgServerHello)
+
+	b = appendU16(b, VerTLS12)
+	b = append(b, random...)
+
+	b, st := s.OpenLen8(b)
+	b = append(b, session...)
+	b = s.CloseLen8(b, st)
+
+	b = appendU16(b, suite)
+	b = appendU8(b, 0) // null compression
+
+	b, ext = s.OpenLen16(b)
+
+	return b, hs, ext
+}
+
+func (s ServerSide) CloseHello(b []byte, hs, ext int) []byte {
+	b = s.CloseLen16(b, ext)
+
+	return s.CloseHandshake(b, hs)
+}
+
 // AppendHello appends TLS ServerHello message m to the buffer b.
 // Variable length values are copied from src, the buffer m was parsed from.
-func (s Server) AppendHello(b []byte, m *ServerHello, src []byte) []byte {
+func (s ServerSide) AppendHello(b []byte, m *ServerHello, src []byte) []byte {
 	b, rec := s.OpenRecord(b, RecHandshake, m.RecordLegacyVersion)
 	b, hs := s.OpenHandshake(b, MsgServerHello)
 
@@ -135,6 +183,12 @@ func (m *ServerHello) parseExt(b []byte, e Ext) error {
 
 		m.Version = u16[ProtocolVersion](b, &i)
 	case ExtKeyShare:
+		if e.Length == 2 { // HelloRetryRequest
+			m.KeyShare = Key{Group: u16[KeyGroup](b, &i), Offset: uint16(i)}
+
+			return nil
+		}
+
 		if e.Length < 4 {
 			return ErrMalformed
 		}
@@ -150,9 +204,21 @@ func (m *ServerHello) parseExt(b []byte, e Ext) error {
 		}
 
 		m.KeyShare = k
+	case ExtCookie:
+		r, err := parseCookie(b, e)
+		if err != nil {
+			return err
+		}
+
+		m.Cookie = r
 	}
 
 	return nil
+}
+
+// IsHelloRetryRequest reports whether the parsed ServerHello is a HelloRetryRequest.
+func (m *ServerHello) IsHelloRetryRequest(b []byte) bool {
+	return string(m.Random.Data(b)) == string(HelloRetryRequestRandom[:])
 }
 
 func (m *ServerHello) softResetExts() {
@@ -161,6 +227,10 @@ func (m *ServerHello) softResetExts() {
 	} else {
 		m.Exts = m.Exts[:0]
 	}
+
+	m.Version = 0
+	m.KeyShare = Key{}
+	m.Cookie = zeroRange
 }
 
 func (m *ServerHello) Dump(buf []byte) string {

@@ -2,6 +2,7 @@ package rawtls
 
 import (
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -62,17 +63,18 @@ const (
 //
 //	RFC8446: https://datatracker.ietf.org/doc/html/rfc8446#section-4
 const (
-	MsgClientHello         HandshakeType = 0x01
-	MsgServerHello         HandshakeType = 0x02
-	MsgNewSessionTicket    HandshakeType = 0x04
-	MsgEndOfEarlyData      HandshakeType = 0x05
-	MsgEncryptedExtensions HandshakeType = 0x08
-	MsgCertificate         HandshakeType = 0x0b
-	MsgCertificateRequest  HandshakeType = 0x0d
-	MsgCertificateVerify   HandshakeType = 0x0f
-	MsgFinished            HandshakeType = 0x14
-	MsgKeyUpdate           HandshakeType = 0x18
-	MsgMessageHash         HandshakeType = 0xfe
+	MsgClientHello           HandshakeType = 0x01
+	MsgServerHello           HandshakeType = 0x02
+	MsgNewSessionTicket      HandshakeType = 0x04
+	MsgEndOfEarlyData        HandshakeType = 0x05
+	MsgEncryptedExtensions   HandshakeType = 0x08
+	MsgCertificate           HandshakeType = 0x0b
+	MsgCertificateRequest    HandshakeType = 0x0d
+	MsgCertificateVerify     HandshakeType = 0x0f
+	MsgFinished              HandshakeType = 0x14
+	MsgKeyUpdate             HandshakeType = 0x18
+	MsgCompressedCertificate HandshakeType = 0x19 // RFC 8879
+	MsgMessageHash           HandshakeType = 0xfe
 )
 
 // Extension types.
@@ -228,6 +230,19 @@ var (
 	ErrShortBuffer = io.ErrShortBuffer
 	ErrUnexpected  = errors.New("unexpected message")
 	ErrMalformed   = errors.New("malformed message")
+	ErrUnsupported = errors.ErrUnsupported
+	ErrShutdown    = errors.New("protocol is shutdown")
 )
 
 var zeroRange BytesRange
+
+// HelloRetryRequestRandom is the ServerHello random marking HelloRetryRequest,
+// SHA-256 of "HelloRetryRequest".
+//
+//	RFC8446: https://datatracker.ietf.org/doc/html/rfc8446#section-4.1.3
+var HelloRetryRequestRandom = [32]byte{
+	0xcf, 0x21, 0xad, 0x74, 0xe5, 0x9a, 0x61, 0x11, 0xbe, 0x1d, 0x8c, 0x02, 0x1e, 0x65, 0xb8, 0x91,
+	0xc2, 0xa2, 0x11, 0x16, 0x7a, 0xbb, 0x8c, 0x5e, 0x07, 0x9e, 0x09, 0xe2, 0xc8, 0xa8, 0x33, 0x9c,
+}
+
+func (a AlertDescription) Error() string { return fmt.Sprintf("alert:%d", int(a)) }
