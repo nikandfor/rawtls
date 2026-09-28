@@ -20,10 +20,10 @@ var defaultSignatureSchemes = []SignatureScheme{
 	SigRSAPKCS1SHA256, SigRSAPKCS1SHA384, SigRSAPKCS1SHA512,
 }
 
-// appendSignedContent appends the content signed in CertificateVerify.
+// AppendSignedContent appends the content signed in CertificateVerify over the transcript hash.
 //
 //	RFC8446: https://datatracker.ietf.org/doc/html/rfc8446#section-4.4.3
-func appendSignedContent(b []byte, server bool, transcript []byte) []byte {
+func AppendSignedContent(b []byte, server bool, transcript []byte) []byte {
 	for range 64 {
 		b = append(b, ' ')
 	}

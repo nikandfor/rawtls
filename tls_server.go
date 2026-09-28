@@ -125,7 +125,7 @@ func (hs *serverHandshake) run() (err error) {
 		return err
 	}
 
-	err = c.setInKeys(hs.suite, hs.clientSecret)
+	err = c.SetInKeys(hs.suite, hs.clientSecret)
 	if err != nil {
 		return err
 	}
@@ -135,7 +135,7 @@ func (hs *serverHandshake) run() (err error) {
 		return err
 	}
 
-	err = c.setInKeys(hs.suite, clientApp)
+	err = c.SetInKeys(hs.suite, clientApp)
 	if err != nil {
 		return err
 	}
@@ -317,10 +317,7 @@ func (hs *serverHandshake) sendRetry(m []byte) error {
 	b = appendU16(b, hs.group)
 	b = ss.CloseExt(b, st)
 
-	b, st = ss.OpenExt(b, ExtSupportedVersions)
-	b = appendU16(b, VerTLS13)
-	b = ss.CloseExt(b, st)
-
+	b = ss.AppendExtSelectedVersion(b, VerTLS13)
 	b = ss.CloseHello(b, h, ext)
 
 	hs.s.Transcript.Write(b)
@@ -328,8 +325,8 @@ func (hs *serverHandshake) sendRetry(m []byte) error {
 	defer c.wmu.Unlock()
 	c.wmu.Lock()
 
-	w := c.appendHandshake(c.buf(), VerTLS12, b)
-	w = c.appendChangeCipherSpec(w)
+	w := c.AppendHandshake(c.buf(), VerTLS12, b)
+	w = c.AppendChangeCipherSpec(w)
 
 	hs.sentCCS = true
 
@@ -344,11 +341,9 @@ func (hs *serverHandshake) appendServerHello(b, m, pub []byte) []byte {
 
 	b, h, ext := ss.OpenHello(b, random[:], hs.ch.Session.Data(m), hs.suite)
 
-	b, st := ss.OpenExt(b, ExtSupportedVersions)
-	b = appendU16(b, VerTLS13)
-	b = ss.CloseExt(b, st)
+	b = ss.AppendExtSelectedVersion(b, VerTLS13)
 
-	b, st = ss.OpenExt(b, ExtKeyShare)
+	b, st := ss.OpenExt(b, ExtKeyShare)
 	b = ss.AppendKeyShareEntry(b, hs.group, pub)
 	b = ss.CloseExt(b, st)
 
@@ -374,7 +369,7 @@ func (hs *serverHandshake) appendFlight(b []byte) ([]byte, error) {
 	hs.s.Transcript.Write(b[st:])
 	st = len(b)
 
-	sig, err := sign(hs.signer, hs.scheme, appendSignedContent(nil, true, hs.s.Transcript.Sum(nil)))
+	sig, err := sign(hs.signer, hs.scheme, AppendSignedContent(nil, true, hs.s.Transcript.Sum(nil)))
 	if err != nil {
 		return nil, fmt.Errorf("sign certificate verify: %w", err)
 	}
@@ -403,10 +398,10 @@ func (hs *serverHandshake) sendFlight(sh, flight, serverApp []byte) error {
 	defer c.wmu.Unlock()
 	c.wmu.Lock()
 
-	b := c.appendHandshake(c.buf(), VerTLS12, sh)
+	b := c.AppendHandshake(c.buf(), VerTLS12, sh)
 
 	if !hs.sentCCS {
-		b = c.appendChangeCipherSpec(b)
+		b = c.AppendChangeCipherSpec(b)
 	}
 
 	err := c.Out.ResetSecret(hs.suite, hs.serverSecret)
@@ -414,7 +409,7 @@ func (hs *serverHandshake) sendFlight(sh, flight, serverApp []byte) error {
 		return err
 	}
 
-	b = c.appendHandshake(b, VerTLS12, flight)
+	b = c.AppendHandshake(b, VerTLS12, flight)
 
 	err = c.Out.ResetSecret(hs.suite, serverApp)
 	if err != nil {

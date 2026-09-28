@@ -20,6 +20,9 @@ type (
 	//	err = c.In.ResetSecret(suite, peerTrafficSecret)
 	//	err = c.Out.ResetSecret(suite, ownTrafficSecret)
 	//
+	// The caller can also run its own handshake over the record layer
+	// with ReadHandshake, AppendHandshake, AppendChangeCipherSpec, SetInKeys and SetOutKeys.
+	//
 	// Read and Write can be called concurrently.
 	// Keys must come from ResetSecret for KeyUpdate to work.
 	Conn struct {
@@ -232,6 +235,20 @@ func (c *Conn) processHandshake(data []byte) error {
 	return nil
 }
 
+// ReadHandshake reads the next handshake message, header included, for a handshake run by the caller.
+// The message is valid until the next call.
+// Plaintext records are accepted until In keys are set, ChangeCipherSpec is dropped.
+func (c *Conn) ReadHandshake() (msg HandshakeType, m []byte, err error) {
+	handshaking := c.handshaking
+	c.handshaking = true
+
+	msg, m, err = c.readMessage()
+
+	c.handshaking = handshaking
+
+	return msg, m, err
+}
+
 // readMessage reads the next handshake message, header included.
 // The message is valid until the next call.
 func (c *Conn) readMessage() (msg HandshakeType, m []byte, err error) {
@@ -280,9 +297,9 @@ func (c *Conn) compactHandshake() {
 	c.hi = 0
 }
 
-// setInKeys switches incoming records to the traffic secret.
+// SetInKeys switches incoming records to the traffic secret.
 // Handshake messages must not span key changes.
-func (c *Conn) setInKeys(suite CipherSuite, secret []byte) error {
+func (c *Conn) SetInKeys(suite CipherSuite, secret []byte) error {
 	if c.hi != len(c.hbuf) {
 		return c.fail(AlertUnexpectedMessage)
 	}

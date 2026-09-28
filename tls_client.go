@@ -138,12 +138,12 @@ func (hs *clientHandshake) run() (err error) {
 		return c.fail(err)
 	}
 
-	err = c.setInKeys(hs.s.Suite, hs.serverSecret)
+	err = c.SetInKeys(hs.s.Suite, hs.serverSecret)
 	if err != nil {
 		return err
 	}
 
-	err = c.setOutKeys(hs.s.Suite, hs.clientSecret) // even alerts are protected from now on
+	err = c.SetOutKeys(hs.s.Suite, hs.clientSecret) // even alerts are protected from now on
 	if err != nil {
 		return c.fail(err)
 	}
@@ -173,7 +173,7 @@ func (hs *clientHandshake) run() (err error) {
 		return c.fail(err)
 	}
 
-	err = c.setInKeys(hs.s.Suite, serverApp)
+	err = c.SetInKeys(hs.s.Suite, serverApp)
 	if err != nil {
 		return err
 	}
@@ -253,11 +253,11 @@ func (hs *clientHandshake) sendHello(ver ProtocolVersion) error {
 	w := c.buf()
 
 	if hs.retried && !hs.sentCCS {
-		w = c.appendChangeCipherSpec(w)
+		w = c.AppendChangeCipherSpec(w)
 		hs.sentCCS = true
 	}
 
-	w = c.appendHandshake(w, ver, b)
+	w = c.AppendHandshake(w, ver, b)
 
 	return c.write(w)
 }
@@ -506,7 +506,7 @@ func (hs *clientHandshake) readCertificateVerify() error {
 		return c.fail(fmt.Errorf("%w: certificate verify: %w", AlertDecodeError, err))
 	}
 
-	err = verifySignature(hs.certs[0].PublicKey, scheme, appendSignedContent(nil, true, sum), sig)
+	err = verifySignature(hs.certs[0].PublicKey, scheme, AppendSignedContent(nil, true, sum), sig)
 	if err != nil {
 		return c.fail(err)
 	}
@@ -584,10 +584,10 @@ func (hs *clientHandshake) sendFinished(clientApp []byte) error {
 	b := c.buf()
 
 	if !hs.sentCCS {
-		b = c.appendChangeCipherSpec(b)
+		b = c.AppendChangeCipherSpec(b)
 	}
 
-	b = c.appendHandshake(b, VerTLS12, msgs)
+	b = c.AppendHandshake(b, VerTLS12, msgs)
 
 	err = c.Out.ResetSecret(hs.s.Suite, clientApp)
 	if err != nil {

@@ -142,6 +142,16 @@ func (s ServerSide) CloseHello(b []byte, hs, ext int) []byte {
 	return s.CloseHandshake(b, hs)
 }
 
+// AppendExtSelectedVersion appends supported_versions extension of ServerHello.
+//
+//	RFC8446: https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.1
+func (s ServerSide) AppendExtSelectedVersion(b []byte, ver ProtocolVersion) []byte {
+	b, st := s.OpenExt(b, ExtSupportedVersions)
+	b = appendU16(b, ver)
+
+	return s.CloseExt(b, st)
+}
+
 // AppendHello appends TLS ServerHello message m to the buffer b.
 // Variable length values are copied from src, the buffer m was parsed from.
 func (s ServerSide) AppendHello(b []byte, m *ServerHello, src []byte) []byte {

@@ -492,7 +492,7 @@ func cat(bs ...[]byte) (r []byte) {
 func TestConnHandshakeRecordsRFC8448(t *testing.T) {
 	in := cat(
 		appendPlainRecord(nil, RecHandshake, VerTLS12, unhex(t, rfcServerHello)),
-		(&Conn{}).appendChangeCipherSpec(nil),
+		(&Conn{}).AppendChangeCipherSpec(nil),
 		unhex(t, rfcServerHandshakeRecord),
 	)
 
@@ -508,7 +508,7 @@ func TestConnHandshakeRecordsRFC8448(t *testing.T) {
 
 			readMessage(t, c, MsgServerHello, rfcServerHello)
 
-			err := c.setInKeys(TLS_AES_128_GCM_SHA256, unhex(t, rfcServerHandshakeSecret))
+			err := c.SetInKeys(TLS_AES_128_GCM_SHA256, unhex(t, rfcServerHandshakeSecret))
 			if err != nil {
 				t.Fatalf("set keys: %v", err)
 			}
@@ -523,14 +523,14 @@ func TestConnHandshakeRecordsRFC8448(t *testing.T) {
 	wc := &testConn{}
 	c := &Conn{Conn: wc, handshaking: true}
 
-	b := c.appendHandshake(c.buf(), VerTLS10, unhex(t, rfcClientHello))
+	b := c.AppendHandshake(c.buf(), VerTLS10, unhex(t, rfcClientHello))
 
-	err := c.setOutKeys(TLS_AES_128_GCM_SHA256, unhex(t, rfcClientHandshakeSecret))
+	err := c.SetOutKeys(TLS_AES_128_GCM_SHA256, unhex(t, rfcClientHandshakeSecret))
 	if err != nil {
 		t.Fatalf("set keys: %v", err)
 	}
 
-	b = c.appendHandshake(b, VerTLS12, unhex(t, rfcClientFinished))
+	b = c.AppendHandshake(b, VerTLS12, unhex(t, rfcClientFinished))
 
 	err = c.write(b)
 	if err != nil {
@@ -560,7 +560,7 @@ func TestConnHandshakeFragmented(t *testing.T) {
 
 	msg := e.AppendCertificate(nil, nil, cert)
 
-	err := w.write(w.appendHandshake(w.buf(), VerTLS12, msg))
+	err := w.write(w.AppendHandshake(w.buf(), VerTLS12, msg))
 	if err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -626,7 +626,7 @@ func TestConnHandshakeErrors(t *testing.T) {
 					t.Fatalf("read: %v", err)
 				}
 
-				err = c.setInKeys(TLS_AES_128_GCM_SHA256, bytes.Repeat([]byte{1}, 32))
+				err = c.SetInKeys(TLS_AES_128_GCM_SHA256, bytes.Repeat([]byte{1}, 32))
 			}
 
 			if !errors.Is(err, tc.err) {

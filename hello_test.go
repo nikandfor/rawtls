@@ -278,9 +278,7 @@ func appendServerHello(t *testing.T, b []byte, m *ServerHello, src []byte) []byt
 
 		switch x.Type {
 		case ExtSupportedVersions:
-			b, st = s.OpenExt(b, ExtSupportedVersions)
-			b = appendU16(b, m.Version)
-			b = s.CloseExt(b, st)
+			b = s.AppendExtSelectedVersion(b, m.Version)
 		case ExtKeyShare:
 			b, st = s.OpenExt(b, ExtKeyShare)
 

@@ -149,9 +149,11 @@ func (c *Conn) writeRecord(tp ContentType, data []byte) error {
 	return c.write(b)
 }
 
-// appendHandshake appends handshake messages as records of at most MaxPlaintext.
+// AppendHandshake appends handshake messages as records of at most MaxPlaintext.
 // Before Out keys are set the records are plaintext with legacy version ver.
-func (c *Conn) appendHandshake(b []byte, ver ProtocolVersion, msgs []byte) []byte {
+// It's for a handshake run by the caller before the Conn is used concurrently:
+// the buffer is written to the underlying connection by the caller.
+func (c *Conn) AppendHandshake(b []byte, ver ProtocolVersion, msgs []byte) []byte {
 	for len(msgs) != 0 {
 		m := min(len(msgs), MaxPlaintext)
 
@@ -167,15 +169,15 @@ func (c *Conn) appendHandshake(b []byte, ver ProtocolVersion, msgs []byte) []byt
 	return b
 }
 
-// appendChangeCipherSpec appends ChangeCipherSpec record of the middlebox compatibility mode.
+// AppendChangeCipherSpec appends ChangeCipherSpec record of the middlebox compatibility mode.
 //
 //	RFC8446: https://datatracker.ietf.org/doc/html/rfc8446#appendix-D.4
-func (c *Conn) appendChangeCipherSpec(b []byte) []byte {
+func (c *Conn) AppendChangeCipherSpec(b []byte) []byte {
 	return appendPlainRecord(b, RecChangeCipherSpec, VerTLS12, []byte{1})
 }
 
-// setOutKeys switches outgoing records to the traffic secret.
-func (c *Conn) setOutKeys(suite CipherSuite, secret []byte) error {
+// SetOutKeys switches outgoing records to the traffic secret.
+func (c *Conn) SetOutKeys(suite CipherSuite, secret []byte) error {
 	defer c.wmu.Unlock()
 	c.wmu.Lock()
 

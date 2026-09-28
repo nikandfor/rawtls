@@ -102,7 +102,7 @@ func testCapture(t *testing.T, name string) {
 
 			scheme, sig, _, err = d.CertificateVerify(m, 0)
 			if err == nil && leaf != nil {
-				err = verifySignature(leaf.PublicKey, scheme, appendSignedContent(nil, true, sch.Transcript.Sum(nil)), sig)
+				err = verifySignature(leaf.PublicKey, scheme, AppendSignedContent(nil, true, sch.Transcript.Sum(nil)), sig)
 			}
 		case MsgFinished:
 			var verify []byte
